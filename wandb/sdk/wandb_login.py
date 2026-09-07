@@ -114,6 +114,9 @@ def login(
         prompt=prompt,
     )
 
+    if not logged_in and not prompt:
+        return False
+
     _update_system_settings(
         global_settings.read_system_settings(),
         host=host,
