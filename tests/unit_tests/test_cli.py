@@ -12,6 +12,8 @@ import wandb
 import wandb.docker
 from wandb import env
 from wandb.cli import cli
+from wandb.sdk import wandb_setup
+from wandb.sdk.lib import config_util
 
 DOCKER_SHA = (
     "wandb/deepo@sha256:"
@@ -81,6 +83,61 @@ def test_no_project_bad_command(runner):
         result = runner.invoke(cli.cli, ["fsd"])
         assert "No such command" in result.output
         assert result.exit_code == 2
+
+
+@pytest.fixture
+def cli_run(mocker, patch_apikey):
+    mocker.patch("wandb.sdk.wandb_login._verify_login")
+    run_class = mocker.patch("wandb.apis.public.Run")
+    run = run_class.return_value
+    run.id = "run-id"
+    run.project = "configured-project"
+    run.commit = None
+    run.rawconfig = {}
+    run.metadata = {}
+    file = mocker.Mock()
+    file.name = "file.txt"
+    run.files.side_effect = lambda names=None: [] if names else [file]
+    return run_class
+
+
+@pytest.mark.parametrize("command", [cli.pull, cli.restore])
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("run-id", ("option-entity", "configured-project", "run-id")),
+        ("path-project/run-id", ("option-entity", "path-project", "run-id")),
+        ("path-project:run-id", ("option-entity", "path-project", "run-id")),
+        (
+            "path-entity/path-project/run-id",
+            ("path-entity", "path-project", "run-id"),
+        ),
+    ],
+)
+def test_run_commands_resolve_path(
+    runner, cli_run, monkeypatch, command, path, expected
+):
+    monkeypatch.delenv("WANDB_PROJECT", raising=False)
+    wandb_setup.singleton().settings.project = "configured-project"
+    args = ["--entity", "option-entity", path]
+    if command is cli.restore:
+        args.insert(0, "--no-git")
+
+    result = runner.invoke(command, args)
+
+    assert result.exit_code == 0, result.output
+    assert cli_run.call_args.args[1:] == expected
+
+
+def test_restore_config_can_be_loaded(runner, cli_run, tmp_path, monkeypatch):
+    config = {"epochs": 10, "layers": [32, 64], "nested": {"value": "original"}}
+    cli_run.return_value.rawconfig = {**config, "_wandb": {}, "wandb_version": 1}
+    monkeypatch.setattr(cli, "_get_wandb_dir", lambda: str(tmp_path / "wandb"))
+
+    result = runner.invoke(cli.restore, ["--no-git", "entity/project/run-id"])
+
+    assert result.exit_code == 0, result.output
+    assert config_util.dict_from_config_file(tmp_path / "wandb/config.yaml") == config
 
 
 @pytest.mark.parametrize(

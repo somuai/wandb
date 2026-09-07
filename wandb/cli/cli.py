@@ -25,7 +25,7 @@ from click.exceptions import ClickException
 import wandb
 import wandb.errors
 import wandb.sdk.verify.verify as wandb_verify
-from wandb import Config, Error, env, util, wandb_agent
+from wandb import Error, env, util, wandb_agent
 from wandb.analytics import get_telemetry_recorder
 from wandb.apis import PublicApi
 from wandb.apis.public.sweeps import _sweep_with_runs, _upsert_sweep
@@ -41,7 +41,7 @@ from wandb.sdk.launch.api import LaunchApi
 from wandb.sdk.launch.errors import ExecutionError, LaunchError
 from wandb.sdk.launch.sweeps import utils as sweep_utils
 from wandb.sdk.launch.sweeps.scheduler import Scheduler
-from wandb.sdk.lib import filesystem, settings_file, wbauth
+from wandb.sdk.lib import config_util, filesystem, settings_file, wbauth
 from wandb.sdk.lib.filenames import DIFF_FNAME
 from wandb.sdk.lib.hashutil import md5_file_b64
 from wandb.sdk.lib.service.service_connection import WandbApiFailedError
@@ -201,15 +201,6 @@ def _configured_api_key() -> str | None:
     """The API key from the environment or netrc, without prompting for one."""
     settings = wandb_setup.singleton().settings
     return settings.api_key or wbauth.read_netrc_auth(host=settings.base_url)
-
-
-def _run_path(run: str, project: str | None, entity: str | None) -> str:
-    """Combine the run argument with the project and entity options into a run path."""
-    if "/" not in run and project:
-        run = f"{project}/{run}"
-    if entity and run.count("/") < 2:
-        run = f"{entity}/{run}"
-    return run
 
 
 def _run_file_text(api_run, name: str) -> str | None:
@@ -2987,7 +2978,14 @@ def pull(run, project, entity):
 
         $ wandb pull -p foobar -e team-awesome abcd1234
     """
-    api_run = wandb.Api().run(_run_path(run, project, entity))
+    api = wandb.Api(
+        overrides={
+            key: value
+            for key, value in {"project": project, "entity": entity}.items()
+            if value is not None
+        }
+    )
+    api_run = api.run(run)
     files = api_run.files()
     if len(files) == 0:
         raise ClickException("Run has no files")
@@ -3081,17 +3079,14 @@ def restore(ctx, run, no_git, branch, project, entity):
     """
     from wandb.sdk.lib.gitlib import GitRepo
 
-    api = wandb.Api()
-    if ":" in run:
-        if "/" in run:
-            entity, rest = run.split("/", 1)
-        else:
-            rest = run
-        project, run = rest.split(":", 1)
-    elif run.count("/") > 1:
-        entity, run = run.split("/", 1)
-
-    api_run = api.run(_run_path(run, project, entity))
+    api = wandb.Api(
+        overrides={
+            key: value
+            for key, value in {"project": project, "entity": entity}.items()
+            if value is not None
+        }
+    )
+    api_run = api.run(run)
     project, run = api_run.project, api_run.id
     commit = api_run.commit
     json_config = api_run.rawconfig
@@ -3174,23 +3169,15 @@ Run `git clone {repo}` and restore from there or pass the --no-git flag."""
                 )
 
     wandb_dir = _get_wandb_dir()
-    filesystem.mkdir_exists_ok(wandb_dir)
     config_path = os.path.join(wandb_dir, "config.yaml")
-    config = Config()
-    for k, v in json_config.items():
-        if k not in ("_wandb", "wandb_version"):
-            config[k] = v
-    s = b"wandb_version: 1"
-    s += b"\n\n" + yaml.dump(
-        config._as_dict(),
-        Dumper=yaml.SafeDumper,
-        default_flow_style=False,
-        allow_unicode=True,
-        encoding="utf-8",
+    config_util.save_config_file_from_dict(
+        config_path,
+        {
+            key: {"value": value}
+            for key, value in json_config.items()
+            if key not in ("_wandb", "wandb_version")
+        },
     )
-    s = s.decode("utf-8")
-    with open(config_path, "w") as f:
-        f.write(s)
 
     wandb.termlog(f"Restored config variables to {config_path}")
     if image:
