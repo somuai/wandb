@@ -85,6 +85,19 @@ def test_no_project_bad_command(runner):
         assert result.exit_code == 2
 
 
+@pytest.mark.usefixtures("skip_verify_login")
+def test_projects_with_sagemaker_credentials(runner, monkeypatch, mocker):
+    monkeypatch.setenv("SM_TRAINING_ENV", "{}")
+    with open("secrets.env", "w") as f:
+        f.write(f"WANDB_API_KEY={'sagemaker' * 5}\n")
+    mocker.patch.object(wandb.Api, "projects", return_value=[])
+
+    result = runner.invoke(cli.projects, ["--entity", "example"])
+
+    assert result.exit_code == 0, result.output
+    assert "No projects found for example" in result.output
+
+
 @pytest.fixture
 def cli_run(mocker, patch_apikey):
     mocker.patch("wandb.sdk.wandb_login._verify_login")
