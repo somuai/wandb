@@ -38,6 +38,7 @@ Legacy `wandb sync` options have been removed. See `wandb sync --help`.
 
 ### Fixed
 
+- `wandb sync` explains when a `.wandb` file ends with an incomplete record and suggests how to retry.
 - Syncing an already uploaded MD5 artifact no longer fails when its staged files have been removed. This was a regression in 0.29.0.
 - Failed artifact uploads preserve their input files for retry, and artifact cleanup only removes files inside the supplied staging directory.
 - `wandb leet` no longer sends usage telemetry when W&B is in offline or disabled mode (`WANDB_MODE=offline` or `WANDB_MODE=disabled`), like the rest of the SDK (@dmitryduev in https://github.com/wandb/wandb/pull/12733)

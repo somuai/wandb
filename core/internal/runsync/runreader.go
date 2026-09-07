@@ -141,6 +141,17 @@ func (r *RunReader) ProcessTransactionLog(ctx context.Context) (err error) {
 			return nil
 		}
 
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return &SyncError{
+				Err:     err,
+				Message: "runsync: incomplete transaction log",
+				UserText: fmt.Sprintf(
+					"Failed to sync all data from %q: the file ends with an incomplete record. If the run is still running, retry after it finishes or use --live.",
+					r.displayPath,
+				),
+			}
+		}
+
 		if err != nil {
 			// TODO: Keep going to skip corrupt data.
 			//   Need to update Read so that we can tell if we can recover.

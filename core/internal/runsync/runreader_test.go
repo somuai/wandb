@@ -2,9 +2,12 @@ package runsync_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"github.com/wandb/wandb/core/internal/runworktest"
 	"github.com/wandb/wandb/core/internal/streamtest"
 	"github.com/wandb/wandb/core/internal/transactionlog"
+	"github.com/wandb/wandb/core/internal/wboperation"
 	spb "github.com/wandb/wandb/core/pkg/service_go_proto"
 )
 
@@ -224,6 +228,90 @@ func Test_CreatesExitRecordIfNotSeen(t *testing.T) {
 	assert.Equal(t,
 		[]runwork.WorkImpl{work1, exitWork},
 		x.FakeRunWork.AllWorkImpls())
+}
+
+func Test_IncompleteRecordHasUserError(t *testing.T) {
+	for _, size := range []int{10, 32 * 1024} {
+		t.Run(fmt.Sprintf("record size %d", size), func(t *testing.T) {
+			x := setup(t)
+			wandbFileWithRecords(t, x.TransactionLog,
+				&spb.Record{Num: 1},
+				&spb.Record{Num: 2, Uuid: strings.Repeat("x", size)},
+			)
+			info, err := os.Stat(x.TransactionLog)
+			require.NoError(t, err)
+			require.NoError(t, os.Truncate(x.TransactionLog, info.Size()-1))
+			work, exitWork := &testWork{ID: 1}, &testWork{ID: 2}
+			gomock.InOrder(
+				x.MockRecordParser.EXPECT().Parse(isRecordWithNumber(1)).Return(work),
+				x.MockRecordParser.EXPECT().Parse(isExitRecord(1)).Return(exitWork),
+			)
+			x.FakeRunWork.QueueResponse(&spb.ServerResponse{})
+
+			err = x.RunReader.ProcessTransactionLog(t.Context())
+
+			var syncErr *runsync.SyncError
+			require.ErrorAs(t, err, &syncErr)
+			assert.ErrorIs(t, syncErr.Err, io.ErrUnexpectedEOF)
+			assert.Contains(t, runsync.ToUserText(err), x.TransactionLog)
+			assert.Contains(t, runsync.ToUserText(err), "incomplete record")
+			assert.Contains(t, runsync.ToUserText(err), "--live")
+			assert.Equal(t, []runwork.WorkImpl{work, exitWork}, x.FakeRunWork.AllWorkImpls())
+		})
+	}
+}
+
+func Test_CorruptRecordRemainsUnexpectedError(t *testing.T) {
+	x := setup(t)
+	wandbFileWithRecords(t, x.TransactionLog, &spb.Record{Num: 1}, &spb.Record{Num: 2})
+	data, err := os.ReadFile(x.TransactionLog)
+	require.NoError(t, err)
+	data[len(data)-1] ^= 0xff // Corrupt the second record without updating its checksum.
+	require.NoError(t, os.WriteFile(x.TransactionLog, data, 0o600))
+	x.MockRecordParser.EXPECT().Parse(isRecordWithNumber(1)).Return(&testWork{})
+	x.MockRecordParser.EXPECT().Parse(isExitRecord(1)).Return(&testWork{})
+	x.FakeRunWork.QueueResponse(&spb.ServerResponse{})
+
+	err = x.RunReader.ProcessTransactionLog(t.Context())
+
+	assert.ErrorContains(t, err, "checksum mismatch")
+	var syncErr *runsync.SyncError
+	assert.False(t, errors.As(err, &syncErr))
+}
+
+func Test_LiveSyncWaitsForIncompleteRecord(t *testing.T) {
+	x := setup(t)
+	operations := wboperation.NewOperations()
+	factory := runsync.RunReaderFactory{
+		Logger:     observabilitytest.NewTestLogger(t),
+		Operations: operations,
+	}
+	reader := factory.New(x.TransactionLog, runsync.ToDisplayPath(x.TransactionLog, ""),
+		nil, true, x.MockRecordParser, x.FakeRunWork)
+	writer, err := transactionlog.OpenWriter(x.TransactionLog)
+	require.NoError(t, err)
+
+	// Filling a block writes the start of this record to disk, leaving its
+	// final chunk buffered until Close.
+	require.NoError(t, writer.Write(&spb.Record{Num: 1, Uuid: strings.Repeat("x", 32*1024)}))
+	require.NoError(t, writer.Write(exitRecord(0)))
+	work, exitWork := &testWork{ID: 1}, &testWork{ID: 2}
+	gomock.InOrder(
+		x.MockRecordParser.EXPECT().Parse(isRecordWithNumber(1)).Return(work),
+		x.MockRecordParser.EXPECT().Parse(isExitRecord(0)).Return(exitWork),
+	)
+	x.FakeRunWork.QueueResponse(&spb.ServerResponse{})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- reader.ProcessTransactionLog(ctx) }()
+
+	assert.Eventually(t, func() bool {
+		return operations.ToProto().GetTotalOperations() > 0
+	}, time.Second, time.Millisecond)
+	require.NoError(t, writer.Close())
+	require.NoError(t, <-done)
+	assert.Equal(t, []runwork.WorkImpl{work, exitWork}, x.FakeRunWork.AllWorkImpls())
 }
 
 func Test_ParsesInitFailure(t *testing.T) {
