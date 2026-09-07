@@ -2,8 +2,10 @@ package monitor_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -179,6 +181,39 @@ func TestShouldCaptureSamplingErr(t *testing.T) {
 		err  error
 		want bool
 	}{
+		{"ProcessExited", process.ErrorProcessNotRunning, false},
+		{
+			"WrappedProcessExited",
+			fmt.Errorf("process metrics: %w", process.ErrorProcessNotRunning),
+			false,
+		},
+		{
+			"JoinedProcessExited",
+			errors.Join(process.ErrorProcessNotRunning),
+			false,
+		},
+		{
+			"ProcessExitedWithOtherError",
+			errors.Join(process.ErrorProcessNotRunning, errors.New("disk read failed")),
+			true,
+		},
+		{
+			"WrappedProcessExitedWithOtherError",
+			fmt.Errorf("system metrics: %w", errors.Join(
+				process.ErrorProcessNotRunning,
+				errors.New("disk read failed"),
+			)),
+			true,
+		},
+		{
+			"ProcessExitedWithOtherExpectedError",
+			errors.Join(
+				process.ErrorProcessNotRunning,
+				status.Error(codes.Unavailable, "disconnected"),
+			),
+			false,
+		},
+		{"MatchingProcessExitedText", errors.New("process does not exist"), true},
 		{
 			"NetstatMissing",
 			errors.New(`exec: "netstat": executable file not found in $PATH`),
